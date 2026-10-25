@@ -15,6 +15,8 @@ See LICENSE in the root of the software repository for the full text of the Lice
 //     shape, non-zero byte offset) resolves against its valid-region footprint.
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <pto/pto-inst.hpp>
@@ -151,4 +153,77 @@ TEST_F(TAssignWindowTest, windowed_strip_roundtrips_through_backing_storage)
     const std::size_t elemOffset = byteOffset / sizeof(int32_t);
     strip.data()[0] = 0x5a5a5a5a;
     EXPECT_EQ(base[elemOffset], 0x5a5a5a5a);
+}
+
+TEST_F(TAssignWindowTest, every_strip_reads_the_parent_layout)
+{
+    AccFull full(kRows, kCols);
+    TASSIGN(full, 0);
+    for (int row = 0; row < kRows; ++row) {
+        for (int col = 0; col < kCols; ++col) {
+            full.SetElement(row, col, row * kCols + col);
+        }
+    }
+    for (int rowStart = 0; rowStart < kRows; rowStart += kStripRows) {
+        const std::size_t offset = GetTileOffset<AccFull>(rowStart, 0);
+        AccStrip strip;
+        AccStrip alias;
+        TASSIGN(strip, offset * sizeof(int32_t));
+        TASSIGN(alias, reinterpret_cast<std::uintptr_t>(full.data() + offset));
+        for (int row = 0; row < kStripRows; ++row) {
+            for (int col = 0; col < kCols; ++col) {
+                EXPECT_EQ(strip.GetElement(row, col), full.GetElement(rowStart + row, col));
+                EXPECT_EQ(alias.GetElement(row, col), full.GetElement(rowStart + row, col));
+            }
+        }
+    }
+}
+
+TEST_F(TAssignWindowTest, rejects_a_view_that_reaches_past_l0c)
+{
+    // The last legal strip ends exactly at the L0C boundary. Advancing it by
+    // one element must still fail, including when the address is a host alias.
+    const std::size_t offset = GetTileOffset<AccFull>(kRows - kStripRows, 0) * sizeof(int32_t);
+    AccStrip strip;
+    EXPECT_DEATH(TASSIGN(strip, offset + sizeof(int32_t)), "exceeds memory region capacity");
+    auto* base = NPUMemoryModel::Instance().GetL0CBase();
+    EXPECT_DEATH(
+        TASSIGN(strip, reinterpret_cast<std::uintptr_t>(base + offset + sizeof(int32_t))),
+        "exceeds memory region capacity");
+}
+
+TEST_F(TAssignWindowTest, dynamic_and_padded_tiles_still_require_the_full_box)
+{
+    AccFull dynamic(kStripRows, kCols);
+    EXPECT_DEATH(TASSIGN(dynamic, sizeof(int32_t)), "exceeds memory region capacity");
+
+    using Padded = Tile<TileType::Vec, float, 16, 64, BLayout::RowMajor, 1, 64, SLayout::NoneBox, 512, PadValue::Zero>;
+    Padded padded;
+    // A padded load can touch all 16 rows even with one valid row.
+    EXPECT_DEATH(TASSIGN(padded, 192 * 1024 - 64 * sizeof(float)), "exceeds memory region capacity");
+}
+
+TEST_F(TAssignWindowTest, host_storage_views_use_the_same_span_check)
+{
+    auto storage = std::make_shared<std::vector<int32_t>>(kRows * kCols);
+    NPUMemoryModel::Instance().RegisterHostStorage(storage);
+    const std::size_t offset = GetTileOffset<AccFull>(kRows - kStripRows, 0);
+    AccStrip strip;
+    TASSIGN(strip, reinterpret_cast<std::uintptr_t>(storage->data() + offset));
+    strip.SetElement(kStripRows - 1, kCols - 1, 42);
+    EXPECT_EQ(storage->back(), 42);
+    EXPECT_DEATH(
+        TASSIGN(strip, reinterpret_cast<std::uintptr_t>(storage->data() + offset + 1)),
+        "exceeds host storage capacity");
+}
+
+TEST_F(TAssignWindowTest, packed_view_span_counts_bytes_instead_of_logical_elements)
+{
+    using Packed = Tile<TileType::Vec, float4_e2m1x2_t, 4, 64, BLayout::RowMajor, 1, 64>;
+    static_assert(Packed::kPackedElementsPerByte == 2);
+    const std::size_t offset = 192 * 1024 - 32;
+    Packed view;
+    TASSIGN(view, offset);
+    EXPECT_EQ(reinterpret_cast<char*>(view.data()), NPUMemoryModel::Instance().GetUBBase() + offset);
+    EXPECT_DEATH(TASSIGN(view, offset + 1), "exceeds memory region capacity");
 }

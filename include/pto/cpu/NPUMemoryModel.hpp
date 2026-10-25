@@ -345,9 +345,21 @@ private:
     }
 
     template <typename TileDef>
-    static constexpr std::size_t GetTileSizeInBytes()
+    static std::size_t GetTileSizeInBytes()
     {
         if constexpr (is_tile_data_v<TileDef>) {
+            // A static, unpadded view keeps its parent's physical strides but
+            // addresses only its valid rectangle. Requiring the whole parent's
+            // allocation again at a nonzero view offset rejects legal windows
+            // near the end of L0C/UB. Include stride gaps and packed elements;
+            // validRows * validCols is not the backing-storage span.
+            if constexpr (TileDef::ValidRow > 0 && TileDef::ValidCol > 0 && TileDef::PadVal == PadValue::Null) {
+                const std::size_t lastElement =
+                    GetTileElementOffset<TileDef>(TileDef::ValidRow - 1, TileDef::ValidCol - 1);
+                return (lastElement / TileDef::kPackedElementsPerByte + 1) * sizeof(typename TileDef::DType);
+            }
+            // Dynamic views can later expand, and padded loads can write the
+            // physical box, so retain the full-allocation check for both.
             return TileDef::GetSizeInBytes();
         } else {
             return static_cast<std::size_t>(TileDef::bufferSize);
@@ -380,7 +392,7 @@ private:
     {
         EnsureInitialized();
 
-        constexpr std::size_t tileBytes = GetTileSizeInBytes<TileDef>();
+        const std::size_t tileBytes = GetTileSizeInBytes<TileDef>();
         PTO_CPU_ASSERT(
             byteOffset <= sizes_[region] && tileBytes <= sizes_[region] - byteOffset,
             "Tile assignment exceeds memory region capacity.");
