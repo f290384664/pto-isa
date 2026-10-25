@@ -98,9 +98,6 @@ PTO_INLINE void CheckTileData(TileData& dst, GlobalData& src)
                 dst.GetValidCol() &&
             src.GetShape(GlobalTensorDim::DIM_3) == dst.GetValidRow();
 
-        std::cout << src.GetShape(GlobalTensorDim::DIM_0) << "," << src.GetShape(GlobalTensorDim::DIM_1) << ","
-                  << src.GetShape(GlobalTensorDim::DIM_2) << "," << src.GetShape(GlobalTensorDim::DIM_4) << " | "
-                  << dst.GetValidCol() << "," << dst.GetValidRow() << std::endl;
         // An ND source always merges DIM_0..DIM_3 into rows, including ND2NZ into a Mat tile that is
         // not row major: there DIM_2 is the nd-matrix count, so the tile has DIM_2 * DIM_3 rows.
         [[maybe_unused]] const bool ndIntoNzTile = GlobalData::layout == pto::Layout::ND && rowsMerged;

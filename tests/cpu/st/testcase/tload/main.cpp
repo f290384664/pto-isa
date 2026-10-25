@@ -29,6 +29,39 @@ protected:
     void TearDown() override {}
 };
 
+template <bool RowMajor>
+void CheckTLoadDoesNotWriteStdout()
+{
+    pto::NPU_MEMORY_INIT(pto::NPUArch::A2A3);
+    using Shape = pto::Shape<1, 1, 1, 8, 32>;
+    using Stride = pto::Stride<256, 256, 256, RowMajor ? 32 : 1, RowMajor ? 1 : 8>;
+    using Global = pto::GlobalTensor<float, Shape, Stride, RowMajor ? pto::Layout::ND : pto::Layout::DN>;
+    using Tile =
+        pto::Tile<pto::TileType::Vec, float, 8, 32, RowMajor ? pto::BLayout::RowMajor : pto::BLayout::ColMajor, 8, 32>;
+    std::vector<float> input(256);
+    for (int row = 0; row < 8; ++row) {
+        for (int col = 0; col < 32; ++col) {
+            input[RowMajor ? row * 32 + col : col * 8 + row] = row * 32 + col;
+        }
+    }
+    Global src(input.data());
+    Tile dst;
+    pto::TASSIGN(dst, 0);
+    testing::internal::CaptureStdout();
+    pto::TLOAD(dst, src);
+    const std::string output = testing::internal::GetCapturedStdout();
+    EXPECT_TRUE(output.empty()) << output;
+    for (int row = 0; row < 8; ++row) {
+        for (int col = 0; col < 32; ++col) {
+            EXPECT_FLOAT_EQ(dst.GetElement(row, col), row * 32 + col);
+        }
+    }
+}
+
+TEST_F(TLOADTest, NdLoadDoesNotWriteStdout) { CheckTLoadDoesNotWriteStdout<true>(); }
+
+TEST_F(TLOADTest, DnLoadDoesNotWriteStdout) { CheckTLoadDoesNotWriteStdout<false>(); }
+
 std::string GetGoldenDir()
 {
     const testing::TestInfo* testInfo = testing::UnitTest::GetInstance()->current_test_info();
