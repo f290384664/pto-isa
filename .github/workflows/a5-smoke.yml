@@ -221,18 +221,32 @@ jobs:
           fi
 
           log_file="a5_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.log"
+          env_file="a5_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.env"
           echo "A5_SMOKE_LOG_FILE=${log_file}" >> "${GITHUB_ENV}"
-          rm -f ./a5_smoke_*.log
+          echo "A5_SMOKE_ENV_FILE=${env_file}" >> "${GITHUB_ENV}"
+          rm -f ./a5_smoke_*.log ./a5_smoke_*.env 2>/dev/null || true
+          # Diagnostics are per run/attempt and are created by the root-run
+          # script, which also fixes their ownership. Do NOT create or remove
+          # the tree here: a stale root-owned parent is not writable by the
+          # runner, and a fatal mkdir would abort before task-submit. Only
+          # prune genuinely old per-run dirs, and never fail the job over it.
+          find ./a5_smoke_diag -mindepth 1 -maxdepth 1 -type d -mtime +7 \
+            -exec rm -rf {} + 2>/dev/null || true
 
-          cat > ./a5_smoke.env <<EOF
+          cat > "./${env_file}" <<EOF
           ASCEND_HOME_PATH=${ASCEND_HOME_PATH}
           A5_PYTHON_BIN_DIR=${A5_PYTHON_BIN_DIR}
           A5_CANN_SETENV_PATH=${A5_CANN_SETENV_PATH}
           A5_GTEST_PREFIX=${A5_GTEST_PREFIX}
           A5_TOOLCHAIN_PATH_PREFIX=${A5_TOOLCHAIN_PATH_PREFIX}
+          A5_SMOKE_RUN_ID=${GITHUB_RUN_ID}
+          A5_SMOKE_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT}
+          A5_SMOKE_TARGET_SHA=${{ steps.trigger.outputs.sha }}
+          A5_SMOKE_DIAG_OWNER_UID=$(id -u)
+          A5_SMOKE_DIAG_OWNER_GID=$(id -g)
           EOF
 
-          task_args=(--env-file ./a5_smoke.env --timeout 0 --max-time 0)
+          task_args=(--env-file "./${env_file}" --timeout 0 --max-time 0)
           if [[ "${DEVICE_ID}" =~ ^[0-9]+$ ]]; then
             task_args+=(--device "${DEVICE_ID}")
           fi
@@ -255,3 +269,24 @@ jobs:
             echo "No A5 smoke log exists for this run/attempt; the smoke tests did not start"
             echo "(checkout or an earlier step failed before tests could run)."
           fi
+
+      # Preserve the per-attempt log and the diagnostics saved by
+      # run_smoke.sh (a5_smoke_diag/<run_id>-<attempt>/: input/golden bins,
+      # cores, dmesg, versions) so a future crash leaves evidence
+      # (issue #388). Only this run/attempt's files are referenced; the env
+      # file is named per attempt so a stale copy from an earlier run can
+      # never be uploaded as this attempt's result.
+      # continue-on-error keeps a flaky artifact upload from failing a green
+      # smoke run.
+      - name: Upload A5 smoke diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: a5-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            a5_smoke_${{ github.run_id }}_${{ github.run_attempt }}.log
+            a5_smoke_${{ github.run_id }}_${{ github.run_attempt }}.env
+            a5_smoke_diag/${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 7
